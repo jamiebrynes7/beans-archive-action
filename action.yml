@@ -1,0 +1,83 @@
+name: Archive beans
+description: Move completed and scrapped beans into .beans/archive through a pull request.
+
+inputs:
+  token:
+    description: Token with write access to contents and pull requests. Must not be GITHUB_TOKEN, because PRs opened with it do not trigger workflows.
+    required: true
+  auto-merge:
+    description: Enable auto-merge on the PR, true or false. When false, the PR stays open.
+    required: false
+    default: "true"
+  merge-method:
+    description: One of merge, squash or rebase. Used only when auto-merging.
+    required: false
+    default: rebase
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        WORKFLOW_TOKEN: ${{ github.token }}
+        AUTO_MERGE: ${{ inputs.auto-merge }}
+        MERGE_METHOD: ${{ inputs.merge-method }}
+      run: |
+        if [ "$TOKEN" = "$WORKFLOW_TOKEN" ]; then
+          echo "::error::token must not be GITHUB_TOKEN, because PRs opened with it do not trigger workflows"
+          exit 1
+        fi
+        case "$AUTO_MERGE" in
+          true | false) ;;
+          *)
+            echo "::error::auto-merge must be true or false, got: $AUTO_MERGE"
+            exit 1
+            ;;
+        esac
+        case "$MERGE_METHOD" in
+          merge | squash | rebase) ;;
+          *)
+            echo "::error::merge-method must be merge, squash or rebase, got: $MERGE_METHOD"
+            exit 1
+            ;;
+        esac
+
+    # Always the default branch: a manual run from another branch would otherwise force-push that
+    # branch's commits onto beans/archive, and so into any open archive PR with auto-merge enabled.
+    # The payload field may be empty on scheduled runs, which already run on the default branch.
+    - name: Checkout repository
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+        token: ${{ inputs.token }}
+        persist-credentials: false
+
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+    - name: Archive completed beans
+      shell: bash
+      run: nix run github:jamiebrynes7/dotfiles/cf33ad1fa6106a817b36437b297a6d63ff38d21f#beans -- archive
+
+    - name: Create or update pull request
+      id: pr
+      uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+      with:
+        token: ${{ inputs.token }}
+        add-paths: .beans
+        commit-message: "beans: archive completed beans"
+        title: "beans: archive completed beans"
+        body: Moves completed and scrapped beans into `.beans/archive/` via `beans archive`.
+        branch: beans/archive
+        delete-branch: true
+
+    - name: Enable auto-merge
+      if: inputs.auto-merge == 'true' && steps.pr.outputs.pull-request-number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        MERGE_METHOD: ${{ inputs.merge-method }}
+        PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+      run: gh pr merge "$PR_NUMBER" --auto "--$MERGE_METHOD"
